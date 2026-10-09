@@ -250,7 +250,7 @@ def transcribe_audio():
 
         # Dung model gemini-1.5-flash ho tro am thanh tot nhat
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-3.5-flash-lite",
             contents=[
                 audio_file,
                 "Hãy nghe đoạn âm thanh này và viết lại chính xác nội dung thành văn bản tiếng Việt. Chỉ trả lời nội dung bạn nghe được, không thêm bất kỳ lời bình luận nào."
