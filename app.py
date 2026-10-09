@@ -253,3 +253,50 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.environ.get("PORT", "10000")),
     )
+
+# ===== ROBOT AI API =====
+from openai import OpenAI
+
+@app.post("/chat")
+def robot_chat():
+    # Kiểm tra dữ liệu gửi từ ESP32
+    data = request.get_json(silent=True) or {}
+    question = data.get("message", "")
+
+    if not isinstance(question, str) or not question.strip():
+        return jsonify(error="message khong duoc de trong"), 400
+
+    if len(question) > 1000:
+        return jsonify(error="Cau hoi qua dai"), 400
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify(error="Server chua cau hinh OPENAI_API_KEY"), 503
+
+    try:
+        client = OpenAI(api_key=api_key)
+
+        response = client.responses.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
+            instructions=(
+                "Ban la robot AI than thien, noi tieng Viet, "
+                "tra loi ngan gon, de hieu, phu hop voi man hinh nho."
+            ),
+            input=question,
+            max_output_tokens=180,
+        )
+
+        answer = response.output_text.strip()
+
+        return jsonify(
+            ok=True,
+            question=question,
+            answer=answer
+        )
+
+    except Exception as exc:
+        app.logger.exception("Robot AI request failed")
+        return jsonify(
+            ok=False,
+            error="Khong goi duoc dich vu AI"
+        ), 502
