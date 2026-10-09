@@ -41,14 +41,14 @@ def capture_worker(url):
     video_url = "https://www.youtube.com/watch?v=" + video_id
 
 command = [
-    "yt-dlp",
-    "--verbose",
-    "--no-warnings",
-    "--no-playlist",
-    "--js-runtimes", "deno",
-    "-f", "best[height<=360]/best",
-    "-g",
-    video_url
+"yt-dlp",
+"--verbose",
+"--no-warnings",
+"--no-playlist",
+"--js-runtimes", "deno",
+"-f", "best[height<=360]/best",
+"-g",
+video_url
 ]
 
 
