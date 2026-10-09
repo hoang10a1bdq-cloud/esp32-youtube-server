@@ -11,6 +11,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && python -m pip install --no-cache-dir --pre --upgrade "yt-dlp[default]"
+RUN yt-dlp --version && deno --version
 
 COPY app.py .
 
