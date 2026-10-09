@@ -40,14 +40,17 @@ def capture_worker(url):
 
     video_url = "https://www.youtube.com/watch?v=" + video_id
 
-    command = [
-        "yt-dlp",
-        "--no-warnings",
-        "--no-playlist",
-        "-f", "best[height<=360]/best",
-        "-g",
-        video_url
-    ]
+command = [
+    "yt-dlp",
+    "--verbose",
+    "--no-warnings",
+    "--no-playlist",
+    "--js-runtimes", "deno",
+    "-f", "best[height<=360]/best",
+    "-g",
+    video_url
+]
+
 
     try:
         result = subprocess.run(
