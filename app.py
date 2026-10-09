@@ -6,7 +6,7 @@ import subprocess
 
 from flask import Flask, request, jsonify, Response
 
-app = Flask(**name**)
+app = Flask(__name__)
 
 # Shared state
 
