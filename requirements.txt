@@ -1,5 +1,5 @@
-
 Flask
 gunicorn
 Pillow
 yt-dlp[default]
+openai
