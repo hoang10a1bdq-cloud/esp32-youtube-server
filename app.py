@@ -317,3 +317,79 @@ def robot_chat():
             ok=False,
             error="Khong goi duoc dich vu AI"
         ), 502
+        
+import io
+import wave
+import tempfile
+import os
+
+# Dung lai thu vien google-genai da cai cho endpoint /chat
+from google import genai
+
+
+@app.post("/transcribe")
+def transcribe_audio():
+    # Nhan PCM mono 16-bit, 16 kHz tu ESP32
+    pcm_data = request.get_data(cache=False)
+
+    max_bytes = 16000 * 2 * 10  # toi da 10 giay
+
+    if not pcm_data:
+        return jsonify(ok=False, error="Khong co audio"), 400
+
+    if len(pcm_data) > max_bytes:
+        return jsonify(ok=False, error="Audio qua dai"), 413
+
+    if len(pcm_data) % 2 != 0:
+        return jsonify(ok=False, error="PCM khong hop le"), 400
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        return jsonify(ok=False, error="Thieu GEMINI_API_KEY"), 503
+
+    try:
+        # Dong goi PCM thanh WAV
+        wav_buffer = io.BytesIO()
+
+        with wave.open(wav_buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(pcm_data)
+
+        with tempfile.NamedTemporaryFile(
+            suffix=".wav", delete=True
+        ) as temp_file:
+            temp_file.write(wav_buffer.getvalue())
+            temp_file.flush()
+
+            client = genai.Client(api_key=api_key)
+
+            audio_file = client.files.upload(
+                file=temp_file.name
+            )
+
+            result = client.interactions.create(
+                model="gemini-3.5-transcribe",
+                input=[
+                    {
+                        "type": "audio",
+                        "uri": audio_file.uri,
+                        "mime_type": "audio/wav",
+                    }
+                ],
+            )
+
+        transcript = (result.output_text or "").strip()
+
+        return jsonify(
+            ok=True,
+            transcript=transcript
+        )
+
+    except Exception:
+        app.logger.exception("Transcription failed")
+        return jsonify(
+            ok=False,
+            error="Khong nhan dien duoc audio"
+        ), 502
