@@ -254,12 +254,14 @@ if __name__ == "__main__":
         port=int(os.environ.get("PORT", "10000")),
     )
 
-# ===== ROBOT AI API =====
-from openai import OpenAI
+
+# ===== ROBOT AI API: GOOGLE GEMINI =====
+import os
+from google import genai
+from google.genai import types
 
 @app.post("/chat")
 def robot_chat():
-    # Kiểm tra dữ liệu gửi từ ESP32
     data = request.get_json(silent=True) or {}
     question = data.get("message", "")
 
@@ -269,24 +271,39 @@ def robot_chat():
     if len(question) > 1000:
         return jsonify(error="Cau hoi qua dai"), 400
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return jsonify(error="Server chua cau hinh OPENAI_API_KEY"), 503
+        return jsonify(
+            ok=False,
+            error="Server chua cau hinh GEMINI_API_KEY"
+        ), 503
 
     try:
-        client = OpenAI(api_key=api_key)
+        client = genai.Client(api_key=api_key)
 
-        response = client.responses.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
-            instructions=(
-                "Ban la robot AI than thien, noi tieng Viet, "
-                "tra loi ngan gon, de hieu, phu hop voi man hinh nho."
+        response = client.models.generate_content(
+            model=os.environ.get(
+                "GEMINI_MODEL",
+                "gemini-2.5-flash-lite"
             ),
-            input=question,
-            max_output_tokens=180,
+            contents=question,
+            config=types.GenerateContentConfig(
+                system_instruction=(
+                    "Ban la robot AI than thien. "
+                    "Tra loi bang tieng Viet, ngan gon, de hieu. "
+                    "Uu tien cau tra loi phu hop voi man hinh nho."
+                ),
+                max_output_tokens=180,
+            ),
         )
 
-        answer = response.output_text.strip()
+        answer = (response.text or "").strip()
+
+        if not answer:
+            return jsonify(
+                ok=False,
+                error="AI khong tra ve noi dung"
+            ), 502
 
         return jsonify(
             ok=True,
@@ -294,8 +311,8 @@ def robot_chat():
             answer=answer
         )
 
-    except Exception as exc:
-        app.logger.exception("Robot AI request failed")
+    except Exception:
+        app.logger.exception("Gemini robot request failed")
         return jsonify(
             ok=False,
             error="Khong goi duoc dich vu AI"
