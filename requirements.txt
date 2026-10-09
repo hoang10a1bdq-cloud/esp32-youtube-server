@@ -1,5 +1,5 @@
 
 Flask
 gunicorn
-yt-dlp
 Pillow
+yt-dlp[default]
