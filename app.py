@@ -1,276 +1,110 @@
 import os
-import re
-import time
-import threading
-import subprocess
 import io
 import wave
 import tempfile
+import json
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
 
 app = Flask(__name__)
 
 # ==========================================
-# QUAN LY YOUTUBE FRAME (yt-dlp + ffmpeg)
+# ENDPOINT: KIỂM TRA TRẠNG THÁI SERVER
 # ==========================================
-lock = threading.Lock()
-latest_jpeg = None
-current_url = ""
-status = "Chua co video"
-last_error = ""
-
-worker_lock = threading.Lock()
-worker_running = False
-
-def extract_video_id(url):
-    patterns = [
-        r"(?:youtube\.com/watch\?(?:.*&)?v=|youtu\.be/)([A-Za-z0-9_-]{11})",
-        r"youtube\.com/shorts/([A-Za-z0-9_-]{11})",
-        r"youtube\.com/live/([A-Za-z0-9_-]{11})",
-        r"youtube\.com/embed/([A-Za-z0-9_-]{11})",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def capture_worker(url):
-    global latest_jpeg, status, last_error, worker_running
-
-    try:
-        video_id = extract_video_id(url)
-        if not video_id:
-            with lock:
-                status = "Link YouTube khong hop le"
-                last_error = "Khong tim thay video ID"
-            return
-
-        video_url = "https://www.youtube.com/watch?v=" + video_id
-        command = [
-            "yt-dlp", "--verbose", "--no-warnings", "--no-playlist",
-            "--js-runtimes", "deno", "-f", "best[height<=360]/best", "-g", video_url,
-        ]
-        
-        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
-
-        if result.returncode != 0 or not result.stdout.strip():
-            error_text = (result.stderr or "yt-dlp khong tra ve URL")[-3000:]
-            with lock:
-                status = "Loi lay video"
-                last_error = error_text
-            return
-
-        stream_url = result.stdout.strip().splitlines()[0]
-
-        with lock:
-            status = "Dang lay hinh"
-            last_error = ""
-
-        while True:
-            ffmpeg_cmd = [
-                "ffmpeg", "-nostdin", "-loglevel", "error", "-i", stream_url,
-                "-frames:v", "1", "-vf", "scale=240:240:force_original_aspect_ratio=decrease,pad=240:240:(ow-iw)/2:(oh-ih)/2",
-                "-q:v", "6", "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-            ]
-            try:
-                frame = subprocess.run(ffmpeg_cmd, capture_output=True, timeout=25)
-                if frame.returncode == 0 and frame.stdout:
-                    with lock:
-                        latest_jpeg = frame.stdout
-                        status = "OK"
-                        last_error = ""
-                else:
-                    error_text = frame.stderr.decode("utf-8", errors="ignore")[-1500:]
-                    with lock:
-                        status = "Loi lay frame"
-                        last_error = (error_text or "FFmpeg khong tao duoc JPEG")
-                    break
-            except subprocess.TimeoutExpired:
-                with lock:
-                    status = "Loi timeout FFmpeg"
-                    last_error = "Doc frame qua 25 giay"
-                break
-            time.sleep(2)
-
-    except subprocess.TimeoutExpired:
-        with lock:
-            status = "Timeout yt-dlp"
-            last_error = "yt-dlp qua 90 giay ma chua tra ket qua"
-    except Exception as exc:
-        with lock:
-            status = "Loi lay video"
-            last_error = str(exc)[-3000:]
-    finally:
-        with worker_lock:
-            worker_running = False
-
 @app.get("/")
 def home():
-    return """
-    <!doctype html>
-    <html>
-    <head><meta charset="utf-8"><title>ESP32 YouTube Server</title></head>
-    <body>
-        <h2>ESP32 YouTube JPEG & AI Server</h2>
-        <p>Set video: /set?url=YOUTUBE_URL</p>
-        <p>Get frame: /frame.jpg</p>
-        <p>Status: /status</p>
-        <p>Health: /health</p>
-    </body>
-    </html>
-    """
-
-@app.get("/set")
-def set_video():
-    global current_url, latest_jpeg, status, last_error, worker_running
-    url = request.args.get("url", "").strip()
-    video_id = extract_video_id(url)
-
-    if not video_id:
-        return jsonify(error="Link YouTube khong hop le"), 400
-
-    with worker_lock:
-        if worker_running:
-            with lock:
-                current_status = status
-            return jsonify(message="Server dang xu ly video", status=current_status), 409
-        worker_running = True
-
-    with lock:
-        current_url = url
-        latest_jpeg = None
-        status = "Dang khoi dong"
-        last_error = ""
-
-    thread = threading.Thread(target=capture_worker, args=(url,), daemon=True)
-    thread.start()
-    return jsonify(message="Da nhan link video", url=url, video_id=video_id)
-
-@app.get("/status")
-def get_status():
-    with lock:
-        return jsonify(status=status, has_frame=latest_jpeg is not None, error=last_error, url=current_url)
-
-@app.get("/frame.jpg")
-def get_frame():
-    with lock:
-        frame = latest_jpeg
-    if frame is None:
-        return jsonify(error="Chua co frame; xem /status"), 503
-    return Response(frame, mimetype="image/jpeg", headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
-
-@app.get("/health")
-def health():
-    return jsonify(ok=True)
-
+    return "<h2>ESP32 AI Voice Chat Server is Running!</h2>"
 
 # ==========================================
-# AI API: GEMINI CHAT TEXT
+# ENDPOINT: AI VOICE CHAT (NGHE & TRẢ LỜI CÙNG LÚC)
 # ==========================================
-@app.post("/chat")
-def robot_chat():
-    data = request.get_json(silent=True) or {}
-    question = data.get("message", "")
-
-    if not isinstance(question, str) or not question.strip():
-        return jsonify(error="message khong duoc de trong"), 400
-    if len(question) > 1000:
-        return jsonify(error="Cau hoi qua dai"), 400
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return jsonify(ok=False, error="Server chua cau hinh GEMINI_API_KEY"), 503
-
-    try:
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"),
-            contents=question,
-            config=types.GenerateContentConfig(
-                system_instruction=(
-                    "Ban la robot AI than thien. "
-                    "Tra loi bang tieng Viet, ngan gon, de hieu. "
-                    "Uu tien cau tra loi phu hop voi man hinh nho."
-                ),
-                max_output_tokens=180,
-            ),
-        )
-        answer = (response.text or "").strip()
-        if not answer:
-            return jsonify(ok=False, error="AI khong tra ve noi dung"), 502
-        return jsonify(ok=True, question=question, answer=answer)
-    except Exception:
-        app.logger.exception("Gemini robot request failed")
-        return jsonify(ok=False, error="Khong goi duoc dich vu AI"), 502
-
-
-# ==========================================
-# AI API: GEMINI AUDIO TRANSCRIBE (SPEECH TO TEXT)
-# ==========================================
-@app.post("/transcribe")
-def transcribe_audio():
-    # Nhan PCM mono 16-bit tu ESP32
+@app.post("/voice_chat")
+def voice_chat():
+    # Nhận âm thanh PCM 16-bit 8000Hz từ ESP32
     pcm_data = request.get_data(cache=False)
-
-    max_bytes = 16000 * 2 * 10  # toi da 10 giay
-    if not pcm_data:
-        return jsonify(ok=False, error="Khong co audio"), 400
-    if len(pcm_data) > max_bytes:
-        return jsonify(ok=False, error="Audio qua dai"), 413
-    if len(pcm_data) % 2 != 0:
-        return jsonify(ok=False, error="PCM khong hop le"), 400
+    
+    if not pcm_data or len(pcm_data) % 2 != 0:
+        return jsonify(ok=False, error="Audio khong hop le"), 400
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return jsonify(ok=False, error="Thieu GEMINI_API_KEY"), 503
 
     try:
-        # Dong goi PCM thanh file WAV
+        # 1. Đóng gói Raw PCM thành file WAV 8000Hz
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            # CHU Y: ESP32 dang gui 8000 Hz, phai dat dung 8000
             wav_file.setframerate(8000) 
             wav_file.writeframes(pcm_data)
 
-        # Tao file tam de gui len Gemini
+        # 2. Tạo file tạm để gửi cho Gemini
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
             temp_file.write(wav_buffer.getvalue())
             temp_file.flush()
             temp_file_name = temp_file.name
 
-        # Goi Gemini API de nhan dien am thanh
+        # 3. Gọi Gemini phân tích âm thanh và tạo câu trả lời
         client = genai.Client(api_key=api_key)
         audio_file = client.files.upload(file=temp_file_name)
 
-        # Dung model gemini-1.5-flash ho tro am thanh tot nhat
+        # Yêu cầu Gemini trả về JSON cứng
+        prompt = """
+        Bạn là một trợ lý AI thông minh tích hợp trên vi điều khiển.
+        Hãy nghe đoạn âm thanh tiếng Việt này và thực hiện 2 việc:
+        1. Chép lại chính xác lời người dùng nói.
+        2. Trả lời câu hỏi/yêu cầu đó một cách ngắn gọn, súc tích (dưới 40 từ) vì màn hình hiển thị rất nhỏ.
+        
+        TRẢ VỀ KẾT QUẢ THEO ĐÚNG ĐỊNH DẠNG JSON SAU (không dùng markdown block):
+        {
+            "transcript": "nội dung người dùng nói",
+            "answer": "câu trả lời của bạn"
+        }
+        
+        Nếu đoạn âm thanh chỉ là tiếng ồn, tạp âm, tiếng quạt máy, không có giọng người rõ ràng, hãy trả về:
+        {
+            "transcript": "[NOISE]",
+            "answer": ""
+        }
+        """
+
         response = client.models.generate_content(
             model="gemini-3.5-flash-lite",
-            contents=[
-                audio_file,
-                "Hãy nghe đoạn âm thanh này và viết lại chính xác nội dung thành văn bản tiếng Việt. Chỉ trả lời nội dung bạn nghe được, không thêm bất kỳ lời bình luận nào."
-            ]
+            contents=[audio_file, prompt]
         )
         
-        # Xoa file audio tren server Gemini va may chu local de tranh tran RAM
+        # 4. Dọn dẹp bộ nhớ
         try:
             client.files.delete(name=audio_file.name)
-        except Exception:
+        except:
             pass
         os.remove(temp_file_name)
 
-        transcript = (response.text or "").strip()
-        return jsonify(ok=True, transcript=transcript)
+        # 5. Xử lý chuỗi JSON Gemini trả về (Bỏ các thẻ markdown nếu có)
+        raw_text = (response.text or "").strip()
+        if raw_text.startswith("```json"):
+            raw_text = raw_text[7:-3].strip()
+        elif raw_text.startswith("```"):
+            raw_text = raw_text[3:-3].strip()
+
+        data = json.loads(raw_text)
+
+        # Xử lý trường hợp tiếng ồn
+        if "[NOISE]" in data.get("transcript", "").upper():
+            return jsonify(ok=True, transcript="(Khong nghe ro)", answer="...")
+
+        return jsonify(
+            ok=True, 
+            transcript=data.get("transcript", ""),
+            answer=data.get("answer", "")
+        )
 
     except Exception as e:
-        app.logger.exception("Transcription failed")
-        return jsonify(ok=False, error=f"Khong nhan dien duoc audio: {str(e)}"), 502
-
+        app.logger.exception("Voice Chat failed")
+        return jsonify(ok=False, error=str(e)), 502
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
