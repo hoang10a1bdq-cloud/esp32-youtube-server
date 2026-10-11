@@ -4,3 +4,4 @@ Pillow
 yt-dlp[default]
 openai
 google-genai
+gTTS
