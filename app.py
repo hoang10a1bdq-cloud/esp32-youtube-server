@@ -1,110 +1,219 @@
+
 import os
 import io
 import wave
-import tempfile
 import json
+import tempfile
+import logging
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from google import genai
 from google.genai import types
+from gtts import gTTS
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 
 # ==========================================
-# ENDPOINT: KIỂM TRA TRẠNG THÁI SERVER
+# 1. KIEM TRA SERVER
 # ==========================================
 @app.get("/")
 def home():
-    return "<h2>ESP32 AI Voice Chat Server is Running!</h2>"
+    return """
+    <h2>ESP32 AI Voice Chat Server</h2>
+    <p>Status: Running</p>
+    <p>Endpoints: /health, /voice_chat, /tts</p>
+    """
+
+
+@app.get("/health")
+def health():
+    return jsonify(
+        ok=True,
+        service="ESP32 AI Voice Chat Server"
+    )
+
 
 # ==========================================
-# ENDPOINT: AI VOICE CHAT (NGHE & TRẢ LỜI CÙNG LÚC)
+# 2. NHAN PCM TU ESP32 -> GEMINI -> JSON
+# PCM: mono, signed 16-bit, 8000 Hz
 # ==========================================
 @app.post("/voice_chat")
 def voice_chat():
-    # Nhận âm thanh PCM 16-bit 8000Hz từ ESP32
     pcm_data = request.get_data(cache=False)
-    
+
     if not pcm_data or len(pcm_data) % 2 != 0:
-        return jsonify(ok=False, error="Audio khong hop le"), 400
+        return jsonify(
+            ok=False,
+            error="Audio PCM khong hop le"
+        ), 400
 
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        return jsonify(ok=False, error="Thieu GEMINI_API_KEY"), 503
+        return jsonify(
+            ok=False,
+            error="Thieu GEMINI_API_KEY tren server"
+        ), 503
+
+    temp_file_name = None
+    client = None
+    uploaded_file = None
 
     try:
-        # 1. Đóng gói Raw PCM thành file WAV 8000Hz
+        # Tao WAV tu PCM
         wav_buffer = io.BytesIO()
+
         with wave.open(wav_buffer, "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
-            wav_file.setframerate(8000) 
+            wav_file.setframerate(8000)
             wav_file.writeframes(pcm_data)
 
-        # 2. Tạo file tạm để gửi cho Gemini
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_file:
+        # Ghi file WAV tam
+        with tempfile.NamedTemporaryFile(
+            suffix=".wav",
+            delete=False
+        ) as temp_file:
             temp_file.write(wav_buffer.getvalue())
-            temp_file.flush()
             temp_file_name = temp_file.name
 
-        # 3. Gọi Gemini phân tích âm thanh và tạo câu trả lời
+        # Upload audio len Gemini
         client = genai.Client(api_key=api_key)
-        audio_file = client.files.upload(file=temp_file_name)
+        uploaded_file = client.files.upload(
+            file=temp_file_name
+        )
 
-        # Yêu cầu Gemini trả về JSON cứng
         prompt = """
-        Bạn là một trợ lý AI thông minh tích hợp trên vi điều khiển.
-        Hãy nghe đoạn âm thanh tiếng Việt này và thực hiện 2 việc:
-        1. Chép lại chính xác lời người dùng nói.
-        2. Trả lời câu hỏi/yêu cầu đó một cách ngắn gọn, súc tích (dưới 40 từ) vì màn hình hiển thị rất nhỏ.
-        
-        TRẢ VỀ KẾT QUẢ THEO ĐÚNG ĐỊNH DẠNG JSON SAU (không dùng markdown block):
-        {
-            "transcript": "nội dung người dùng nói",
-            "answer": "câu trả lời của bạn"
-        }
-        
-        Nếu đoạn âm thanh chỉ là tiếng ồn, tạp âm, tiếng quạt máy, không có giọng người rõ ràng, hãy trả về:
-        {
-            "transcript": "[NOISE]",
-            "answer": ""
-        }
-        """
+Ban la tro ly AI tieng Viet tren robot ESP32.
+
+Hay nghe doan am thanh va tra ve:
+1. transcript: noi dung nguoi dung noi.
+2. answer: cau tra loi ngan gon, duoi 40 tu.
+
+Chi tra ve JSON hop le, khong dung Markdown:
+{
+  "transcript": "noi dung nguoi dung noi",
+  "answer": "cau tra loi"
+}
+
+Neu chi co tieng on, khong nghe ro giong nguoi:
+{
+  "transcript": "[NOISE]",
+  "answer": ""
+}
+"""
 
         response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
-            contents=[audio_file, prompt]
+            model=os.environ.get(
+                "GEMINI_MODEL",
+                "gemini-3.5-flash-lite"
+            ),
+            contents=[uploaded_file, prompt],
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
         )
-        
-        # 4. Dọn dẹp bộ nhớ
-        try:
-            client.files.delete(name=audio_file.name)
-        except:
-            pass
-        os.remove(temp_file_name)
 
-        # 5. Xử lý chuỗi JSON Gemini trả về (Bỏ các thẻ markdown nếu có)
         raw_text = (response.text or "").strip()
-        if raw_text.startswith("```json"):
-            raw_text = raw_text[7:-3].strip()
-        elif raw_text.startswith("```"):
-            raw_text = raw_text[3:-3].strip()
-
         data = json.loads(raw_text)
 
-        # Xử lý trường hợp tiếng ồn
-        if "[NOISE]" in data.get("transcript", "").upper():
-            return jsonify(ok=True, transcript="(Khong nghe ro)", answer="...")
+        transcript = str(data.get("transcript", "")).strip()
+        answer = str(data.get("answer", "")).strip()
+
+        if "[NOISE]" in transcript.upper():
+            return jsonify(
+                ok=True,
+                transcript="(Khong nghe ro)",
+                answer=""
+            )
 
         return jsonify(
-            ok=True, 
-            transcript=data.get("transcript", ""),
-            answer=data.get("answer", "")
+            ok=True,
+            transcript=transcript,
+            answer=answer
         )
 
-    except Exception as e:
-        app.logger.exception("Voice Chat failed")
-        return jsonify(ok=False, error=str(e)), 502
+    except Exception:
+        logger.exception("Voice chat failed")
+        return jsonify(
+            ok=False,
+            error="Xu ly am thanh that bai"
+        ), 502
 
+    finally:
+        # Don dep file tam va file da upload
+        if client is not None and uploaded_file is not None:
+            try:
+                client.files.delete(name=uploaded_file.name)
+            except Exception:
+                logger.warning("Khong xoa duoc file Gemini")
+
+        if temp_file_name and os.path.exists(temp_file_name):
+            try:
+                os.remove(temp_file_name)
+            except OSError:
+                logger.warning("Khong xoa duoc file WAV tam")
+
+
+# ==========================================
+# 3. TEXT -> MP3 TIENG VIET
+# GET /tts?text=Xin%20chao
+# Tra ve truc tiep audio/mpeg
+# ==========================================
+@app.get("/tts")
+def text_to_speech():
+    text = request.args.get("text", "").strip()
+
+    if not text:
+        return jsonify(
+            ok=False,
+            error="Thieu tham so text"
+        ), 400
+
+    if len(text) > 500:
+        return jsonify(
+            ok=False,
+            error="Text qua dai, toi da 500 ky tu"
+        ), 400
+
+    try:
+        audio_buffer = io.BytesIO()
+
+        tts = gTTS(
+            text=text,
+            lang="vi",
+            slow=False
+        )
+        tts.write_to_fp(audio_buffer)
+        audio_buffer.seek(0)
+
+        return send_file(
+            audio_buffer,
+            mimetype="audio/mpeg",
+            as_attachment=False,
+            download_name="answer.mp3",
+            max_age=0
+        )
+
+    except Exception:
+        logger.exception("TTS generation failed")
+        return jsonify(
+            ok=False,
+            error="Tao MP3 that bai"
+        ), 502
+
+
+# ==========================================
+# 4. CHAY SERVER
+# ==========================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
+    port = int(os.environ.get("PORT", "10000"))
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False
+    )
